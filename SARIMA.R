@@ -1,15 +1,9 @@
 # ============================================================
-# SARIMA - TEAMMATE-STYLE FINAL VERSION
-# Train / Validation / Test
-# Dataset: LNS12000002 - Employment Level: Women
+# SARIMA Dataset: LNS12000002 - Employment Level: Women
 # ============================================================
 
 library(forecast)
-
-# ============================================================
 # 1. LOAD DATA
-# ============================================================
-
 data <- read.csv("processed_female_employment.csv")
 
 data$date <- as.Date(data$date)
@@ -25,10 +19,7 @@ female_ts <- ts(
   frequency = 12
 )
 
-# ============================================================
 # 2. TRAIN / VALIDATION / TEST SPLIT
-# ============================================================
-
 validation_size <- 12
 test_size <- 12
 n <- length(female_ts)
@@ -59,10 +50,7 @@ cat("Training   :", length(train_ts), "observations\n")
 cat("Validation :", length(validation_ts), "observations\n")
 cat("Test       :", length(test_ts), "observations\n")
 
-# ============================================================
 # 3. DETERMINE DIFFERENCING ORDERS
-# ============================================================
-
 d <- ndiffs(
   train_ts,
   test = "kpss",
@@ -79,10 +67,7 @@ cat("\n=== DIFFERENCING ===\n")
 cat("d =", d, "\n")
 cat("D =", D, "\n")
 
-# ============================================================
 # 4. HELPER FUNCTIONS
-# ============================================================
-
 calc_accuracy <- function(actual, forecast_values) {
   c(
     RMSE = sqrt(mean((actual - forecast_values)^2)),
@@ -125,11 +110,8 @@ get_ljung_p <- function(model, p, q, P, Q) {
   )$p.value
 }
 
-# ============================================================
 # 5. SARIMA SPECIFICATION SEARCH
 #    FIT ON TRAIN, SCORE ON VALIDATION
-# ============================================================
-
 candidate_table <- data.frame()
 candidate_models <- list()
 candidate_id <- 0
@@ -223,10 +205,7 @@ if (nrow(candidate_table) == 0) {
   stop("No SARIMA candidate could be fitted.")
 }
 
-# ============================================================
 # 6. MODEL SELECTION RULE
-# ============================================================
-
 # QUALIFY:
 #   Ljung-Box p-value > 0.05
 #
@@ -310,10 +289,7 @@ write.csv(
   row.names = FALSE
 )
 
-# ============================================================
 # 7. REFIT SELECTED MODEL ON TRAIN + VALIDATION
-# ============================================================
-
 final_model <- Arima(
   train_validation_ts,
   order = c(
@@ -339,10 +315,7 @@ final_model <- Arima(
 cat("\n=== FINAL MODEL: REFITTED ON TRAIN + VALIDATION ===\n")
 print(final_model)
 
-# ============================================================
 # 8. FINAL RESIDUAL DIAGNOSTICS
-# ============================================================
-
 final_ljung_p <- get_ljung_p(
   final_model,
   selected$p,
@@ -371,11 +344,7 @@ checkresiduals(final_model)
 
 dev.off()
 
-# ============================================================
-# 9. FINAL TEST EVALUATION
-#    TEST IS USED ONLY HERE
-# ============================================================
-
+# 9. FINAL TEST EVALUATION, TEST IS USED ONLY HERE
 test_fc <- forecast(
   final_model,
   h = test_size,
@@ -432,10 +401,7 @@ write.csv(
   row.names = FALSE
 )
 
-# ============================================================
 # 10. TEST FORECAST TABLE + PLOT
-# ============================================================
-
 test_dates <- tail(
   data$date,
   test_size
@@ -484,10 +450,7 @@ lines(
 
 dev.off()
 
-# ============================================================
 # 11. SAVE FINAL PARAMETERS
-# ============================================================
-
 parameter_table <- data.frame(
   Parameter = names(coef(final_model)),
   Estimate = as.numeric(coef(final_model))
@@ -499,10 +462,7 @@ write.csv(
   row.names = FALSE
 )
 
-# ============================================================
 # 12. REFIT ON FULL DATA + FUTURE 12-MONTH FORECAST
-# ============================================================
-
 full_model <- Arima(
   female_ts,
   order = c(
@@ -574,7 +534,6 @@ plot(
 )
 
 dev.off()
-
 cat("\n=== COMPLETED ===\n")
 cat("Selected model:", selected$Model, "\n")
 cat("Results saved successfully.\n")
