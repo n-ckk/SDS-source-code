@@ -45,7 +45,8 @@ Requires R with: `forecast`, `rugarch`, `tseries`, `zoo`, `dplyr`, `ggplot2`,
 | `SARIMA.R` | Seasonal ARIMA grid search — also the test for residual seasonality |
 | `HoltWinter.R` | Holt-Winters additive, 2021+ window |
 | `ARX-GARCH.R` | ARX with intervention dummies, fat tails and an optional GARCH(1,1) variance |
-| `compare_models.R` | Builds `model_comparison.csv` — the deliverable table |
+| `compare_models.R` | Builds `model_comparison.csv` — the single-holdout table |
+| `rolling_cv.R` | Re-scores the same models at 24 forecast origins — the **more reliable** ranking |
 | `run_all.R` | Runs all of the above in order |
 
 Generated CSVs and PNGs are gitignored; regenerate them with `run_all.R`.
@@ -107,7 +108,24 @@ ARX-GARCH.
 
 ## Reading the results
 
-`model_comparison.csv` ranks models by test RMSE on the identical 12-month test
-window, with naive, seasonal-naive and random-walk-with-drift benchmarks in
-`model_comparison_benchmarks.csv`. Quote the margin over random-walk-with-drift:
-it is the honest measure of what the modelling bought.
+Two evaluations, and they disagree. Read both.
+
+`model_comparison.csv` is the strict single-holdout result: one 12-month test
+block, read once, with benchmarks in `model_comparison_benchmarks.csv`. It is
+methodologically clean but **twelve points cannot rank models that finish within
+a few percent of each other**.
+
+`rolling_cv_summary.csv` re-scores the same fixed specifications at 24 forecast
+origins - 288 forecast points instead of 12. Nothing is selected on it, so it
+adds no leakage; it just has far more evidence behind it. Where the two
+disagree, the rolling result is the more reliable one.
+
+They do disagree, and it matters. On the single block, ARX-GARCH and
+Holt-Winters both beat the random-walk-with-drift benchmark. Across 24 origins
+both are **worse** than that benchmark, and only ARIMA(2,1,2) with drift beats it
+consistently (winning 13 of 24 origins). The single block was flattering them.
+
+Note also that `auto_arima.R` and `SARIMA.R` select the *same* specification -
+ARIMA(2,1,2) with drift, identical AIC to ten significant figures. They are one
+model reached by two search procedures, not two independent results, and should
+not be reported as though they corroborate each other.

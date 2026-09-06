@@ -12,8 +12,9 @@
 # is written at the end so the package versions behind a set of results are on
 # the record.
 #
-# RUNTIME: about six minutes end to end. SARIMA.R fits 225 candidate models and
-# accounts for most of it; its search is cached in sarima_model_selection.csv.
+# RUNTIME: about ten minutes end to end. SARIMA.R fits 225 candidate models
+# (cached in sarima_model_selection.csv) and rolling_cv.R refits every model at
+# 24 forecast origins.
 # ==============================================================================
 
 SCRIPTS <- c(
@@ -22,7 +23,8 @@ SCRIPTS <- c(
   "SARIMA.R",
   "HoltWinter.R",
   "ARX-GARCH.R",
-  "compare_models.R"
+  "compare_models.R",
+  "rolling_cv.R"
 )
 
 missing <- SCRIPTS[!file.exists(SCRIPTS)]

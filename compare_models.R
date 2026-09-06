@@ -123,4 +123,17 @@ write.csv(results[order(results$Test_RMSE), ], "model_comparison.csv",
 write.csv(data.frame(Benchmark = rownames(bench), bench, row.names = NULL),
           "model_comparison_benchmarks.csv", row.names = FALSE)
 
+cat("\n--- IMPORTANT: this table rests on twelve observations ---\n")
+cat("Models within a few percent of each other cannot be separated here, and the",
+    "\nsingle block can flatter a model outright: on this block ARX-GARCH and",
+    "\nHolt-Winters both beat the random-walk benchmark, but across 24 forecast",
+    "\norigins (rolling_cv.R) both are WORSE than it. Run rolling_cv.R and quote",
+    "\nrolling_cv_summary.csv as the primary ranking; this table is the strict",
+    "\nread-once holdout, not the most reliable comparison.\n")
+
+cat("\nAlso note: auto_arima.R and SARIMA.R select the SAME specification",
+    "\n- ARIMA(2,1,2) with drift, identical AIC to ten significant figures.",
+    "\nThey are one model found by two search procedures. Do not report them",
+    "\nas independent results that corroborate one another.\n")
+
 cat("\nWrote model_comparison.csv and model_comparison_benchmarks.csv\n")

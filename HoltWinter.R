@@ -106,20 +106,48 @@ if (hw_model$model$par["gamma"] < 0.01) {
 # H0: residuals are independently distributed. The criterion is p > 0.05, so a
 # PASS means we fail to reject H0.
 #
-# CAVEAT worth reporting: checkresiduals() applies df = 0 for an ETS object even
-# though this model estimates 16 parameters, and it caps the test at floor(n/5)
-# lags. On 55 observations that is 11 lags with no degrees-of-freedom correction,
-# which makes this a lenient test. Treat a PASS here as weak evidence.
+# WHY THIS IS NOT JUST checkresiduals(). For an ETS object forecast::
+# checkresiduals() applies df = 0, so no degrees of freedom are deducted for the
+# parameters the model estimated - here 3 smoothing parameters plus 13 initial
+# states. It also caps the test at floor(n/5) lags, which on this window is 11.
+# The result is a lenient test whose PASS is weak evidence. There is no settled
+# df correction for ETS, so rather than pick one silently, both bounds are
+# reported: df = 0 (the package default, most lenient) and df = 3 (deducting the
+# smoothing parameters, stricter). If the verdict differs between them, say so in
+# the report instead of quoting whichever one passes.
 ljung_box <- checkresiduals(hw_model, plot = FALSE)
 
-cat("\nLjung-Box Test:\n")
-cat("Q statistic :", ljung_box$statistic, "\n")
-cat("Degrees free:", ljung_box$parameter, "\n")
-cat("p-value     :", ljung_box$p.value, "\n")
-cat("Verdict     :",
-    ifelse(ljung_box$p.value > 0.05,
-           "PASS - residuals behave as white noise",
-           "FAIL - structure remains in the residuals"), "\n")
+hw_resid <- residuals(hw_model)
+hw_resid <- hw_resid[is.finite(hw_resid)]
+lb_lag   <- min(2 * FREQ, floor(length(hw_resid) / 5))
+
+lb_table <- do.call(rbind, lapply(c(0, 3), function(k) {
+  bt <- Box.test(hw_resid, lag = lb_lag, type = "Ljung-Box", fitdf = k)
+  data.frame(fitdf   = k,
+             lag     = lb_lag,
+             Q       = unname(bt$statistic),
+             df      = unname(bt$parameter),
+             p_value = unname(bt$p.value),
+             verdict = ifelse(bt$p.value > 0.05, "PASS", "FAIL"),
+             row.names = NULL)
+}))
+
+cat("\nLjung-Box on Holt-Winters residuals at lag", lb_lag, "\n")
+cat("(df = 0 is the forecast package default for ETS; df = 3 deducts the",
+    "\nsmoothing parameters. No settled correction exists - both are shown.)\n")
+print(lb_table, row.names = FALSE, digits = 5)
+
+cat("\nParameters actually estimated: 3 smoothing +",
+    length(hw_model$model$par) - 3, "initial states =",
+    length(hw_model$model$par), "\n")
+cat("On", length(hw_resid), "observations this test has little power either way;",
+    "\ntreat a PASS as weak evidence, not as confirmation.\n")
+
+if (length(unique(lb_table$verdict)) > 1) {
+  cat("\nWARNING: the two df conventions DISAGREE. Report both.\n")
+}
+
+write.csv(lb_table, "holt_winters_ljungbox.csv", row.names = FALSE)
 
 png("holt_winters_residual_diagnostics.png",
     width = 1400, height = 900, res = 150)
