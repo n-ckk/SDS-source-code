@@ -371,7 +371,8 @@ cat("this as a limitation rather than as a success.\n")
 # The validation forecast was produced during the search by the train-only fit;
 # reuse it rather than refitting.
 val_metrics  <- evaluate(val_lvl, best_cfg$val_lvl_fc)
-test_metrics <- evaluate(test_lvl, point_lvl)
+test_metrics <- evaluate(test_lvl, point_lvl,
+                         exclude = parts$test$imputed)
 
 # Benchmark: random walk with drift, the minimum standard the model must beat.
 drift  <- (last_lvl_tv - tv_lvl[1]) / (length(tv_lvl) - 1)

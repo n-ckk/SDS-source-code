@@ -332,12 +332,19 @@ test_fc <- forecast(final_model, h = HORIZON, level = c(80, 95))
 val_metrics  <- c(RMSE = selected$Validation_RMSE,
                   MAE  = selected$Validation_MAE,
                   MAPE = selected$Validation_MAPE,
-                  MASE = selected$Validation_MASE)
-test_metrics <- evaluate(parts$test$value, test_fc$mean)
+                  MASE = selected$Validation_MASE,
+                  N    = HORIZON)
+test_metrics <- evaluate(parts$test$value, test_fc$mean,
+                         exclude = parts$test$imputed)
 
 cat("\n=== FINAL TEST ACCURACY (2025-08 .. 2026-07) ===\n")
 print(round(test_metrics, 4))
 cat(sprintf("\nMASE uses the shared denominator %.2f from common.R.\n", MASE_DENOM))
+cat(sprintf("Scored on %d observed months; 2025-10 is excluded because it is\n",
+            unname(test_metrics["N"])))
+cat(sprintf("interpolated, not observed. Including it would give RMSE %.2f.\n",
+            unname(evaluate(parts$test$value, test_fc$mean)["RMSE"])))
+
 
 save_model_result(
   model_id     = MODEL_ID,
@@ -447,7 +454,8 @@ if (is.null(sens_model)) {
 } else {
 
   sens_fc      <- forecast(sens_model, xreg = X_test, level = c(80, 95))
-  sens_metrics <- evaluate(parts$test$value, sens_fc$mean)
+  sens_metrics <- evaluate(parts$test$value, sens_fc$mean,
+                           exclude = parts$test$imputed)
 
   prim_resid <- residual_summary(final_model)
   sens_resid <- residual_summary(sens_model)

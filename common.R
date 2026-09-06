@@ -127,15 +127,33 @@ MASE_DENOMS <- mase_denominators()
 MASE_DENOM  <- unname(MASE_DENOMS["snaive"])
 
 ## ---- One accuracy function --------------------------------------------------
-evaluate <- function(actual, forecast, denom = MASE_DENOM) {
+# `exclude` drops points from the score - pass the imputed flag so models are not
+# graded against interpolated values. 2025-10 is blank at source and filled by
+# linear interpolation between September and November; because it sits exactly on
+# the straight line between its neighbours, any smoothly-trending forecast passes
+# close to it and earns an artificially small error. Measured on this data the
+# ARIMA family's residual there is about 36 against a typical 270, which flatters
+# their RMSE by roughly 12 (4%), while Holt-Winters gains almost nothing. It is
+# therefore not a neutral distortion: it tilts the ranking toward smooth-trend
+# models. Score against observed values only.
+evaluate <- function(actual, forecast, denom = MASE_DENOM, exclude = NULL) {
   actual   <- as.numeric(actual)
   forecast <- as.numeric(forecast)
   stopifnot(length(actual) == length(forecast), length(actual) > 0)
+
+  if (!is.null(exclude)) {
+    keep <- !as.logical(exclude)
+    stopifnot(length(keep) == length(actual), any(keep))
+    actual   <- actual[keep]
+    forecast <- forecast[keep]
+  }
+
   err <- actual - forecast
   c(RMSE = sqrt(mean(err^2)),
     MAE  = mean(abs(err)),
     MAPE = 100 * mean(abs(err / actual)),
-    MASE = mean(abs(err)) / denom)
+    MASE = mean(abs(err)) / denom,
+    N    = length(err))
 }
 
 ## ---- COVID intervention regressors ------------------------------------------
@@ -201,6 +219,7 @@ save_model_result <- function(model_id, model_name, window_start,
     Test_MAE     = unname(test_metrics["MAE"]),
     Test_MAPE    = unname(test_metrics["MAPE"]),
     Test_MASE    = unname(test_metrics["MASE"]),
+    N_scored     = unname(test_metrics["N"]),
     LjungBox_p   = unname(ljung_p),
     Identifiable = identifiable,
     AIC          = unname(aic),

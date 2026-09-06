@@ -1,5 +1,6 @@
 # ==============================================================================
-# rolling_cv.R - compare the models on more than twelve observations
+# rolling_cv.R - compare the models on more than twelve observations, and build
+#                prediction intervals that are actually calibrated
 #
 # WHY THIS EXISTS
 # model_comparison.csv ranks models on a single 12-month test block. Twelve
@@ -16,8 +17,6 @@
 # rolling windows overlap, the per-origin errors are strongly autocorrelated -
 # a naive paired t-test would badly overstate significance, so the summary
 # reports the spread across origins and a win count instead of a p-value.
-#
-# Runtime: a few minutes, dominated by refitting the GARCH at every origin.
 # ==============================================================================
 
 suppressMessages({
@@ -31,14 +30,14 @@ set.seed(123)
 
 N_ORIGINS <- 24      # monthly origins, each forecasting HORIZON months ahead
 NSIM_CV   <- 2000    # simulation paths for ARX-GARCH intervals (20000 in the
-                     # main script; reduced here because it runs 24 times)
+                     # main script; reduced here because it runs at every origin)
 
 data <- load_series()
 n    <- nrow(data)
 
 # The last usable origin must leave HORIZON actuals after it.
-last_origin  <- n - HORIZON
-origin_idx   <- seq(last_origin - N_ORIGINS + 1, last_origin)
+last_origin <- n - HORIZON
+origin_idx  <- seq(last_origin - N_ORIGINS + 1, last_origin)
 
 cat(sprintf("Origins: %d, from %s to %s, each forecasting %d months ahead.\n",
             length(origin_idx),
@@ -130,12 +129,16 @@ MODELS <- list(
   "RW with drift"         = fc_rw
 )
 
-## ---- Roll ---------------------------------------------------------------------
-rows <- data.frame()
+## ---- Roll --------------------------------------------------------------------
+rows <- data.frame()   # one summary row per origin x model
+errs <- data.frame()   # one detail row per origin x model x horizon
 
 for (o in origin_idx) {
   hist <- data[seq_len(o), ]
-  act  <- data$value[(o + 1):(o + HORIZON)]
+  idx  <- (o + 1):(o + HORIZON)
+  act  <- data$value[idx]
+  imp  <- data$imputed[idx]
+  keep <- !imp          # never score against an interpolated actual
 
   for (nm in names(MODELS)) {
     f <- tryCatch(MODELS[[nm]](hist, HORIZON), error = function(e) NULL)
@@ -145,15 +148,21 @@ for (o in origin_idx) {
                                      Cov80 = NA_real_, Cov95 = NA_real_))
       next
     }
+    e <- act - f$mean
+
     rows <- rbind(rows, data.frame(
       Origin = data$date[o], Model = nm,
-      RMSE = sqrt(mean((act - f$mean)^2)),
-      MAE  = mean(abs(act - f$mean)),
+      RMSE  = sqrt(mean(e[keep]^2)),
+      MAE   = mean(abs(e[keep])),
       Cov80 = if (all(is.na(f$lo80))) NA_real_
-              else mean(act >= f$lo80 & act <= f$hi80),
+              else mean((act >= f$lo80 & act <= f$hi80)[keep]),
       Cov95 = if (all(is.na(f$lo95))) NA_real_
-              else mean(act >= f$lo95 & act <= f$hi95),
+              else mean((act >= f$lo95 & act <= f$hi95)[keep]),
       stringsAsFactors = FALSE))
+
+    errs <- rbind(errs, data.frame(
+      Origin = data$date[o], Model = nm, h = seq_len(HORIZON),
+      Error = e, Imputed = imp, stringsAsFactors = FALSE))
   }
   cat(".")
 }
@@ -161,7 +170,7 @@ cat("\n")
 
 write.csv(rows, "rolling_cv_by_origin.csv", row.names = FALSE)
 
-## ---- Summarise ----------------------------------------------------------------
+## ---- Summarise ---------------------------------------------------------------
 agg <- do.call(rbind, lapply(split(rows, rows$Model), function(g) {
   data.frame(Model = g$Model[1],
              Origins   = sum(is.finite(g$RMSE)),
@@ -178,10 +187,9 @@ cat("\n==============================================================\n")
 cat(" ROLLING-ORIGIN EVALUATION -", length(origin_idx), "origins x", HORIZON,
     "months\n")
 cat("==============================================================\n")
+cat("Interpolated actuals are excluded from every score.\n\n")
 print(agg, row.names = FALSE, digits = 5)
 
-# Win counts: which model had the lowest RMSE at each origin. Robust to the
-# overlapping-window dependence that rules out a naive t-test.
 wide <- reshape(rows[, c("Origin", "Model", "RMSE")],
                 idvar = "Origin", timevar = "Model", direction = "wide")
 names(wide) <- sub("^RMSE\\.", "", names(wide))
@@ -192,20 +200,98 @@ wins <- table(factor(colnames(mat)[apply(mat, 1, which.min)],
 cat("\nOrigins won (lowest RMSE at that origin):\n")
 print(as.data.frame(wins, responseName = "Wins"), row.names = FALSE)
 
-cat("\nInterval coverage, pooled over", length(origin_idx) * HORIZON,
-    "forecast points\n")
-cat("(nominal 80% and 95%; well above nominal means intervals too WIDE):\n")
-print(agg[, c("Model", "Cov80", "Cov95")], row.names = FALSE, digits = 4)
+## ---- Empirical prediction intervals ------------------------------------------
+# WHY THE MODEL-BASED INTERVALS FAIL.
+# An ARIMA interval is point +/- z * sqrt(variance), with the variance built from
+# sigma^2 = sum(e_t^2)/n and z taken from the normal distribution. April 2020 is
+# a 26-sigma residual, so that one month contributes about 676 sigma^2 to a sum
+# over 931 terms and inflates sigma by roughly 40%; residual kurtosis of 504 then
+# makes the normal quantile wrong as well. Both errors push the same way, and the
+# measured consequence is 98% coverage where 80% is nominal.
+#
+# THE FIX. Take the observed distribution of h-step-ahead forecast errors across
+# origins and add its quantiles to the point forecast. No normality assumption,
+# no sigma contaminated by a single outlier, and the accurate undummied point
+# forecast is left exactly as it is.
+#
+# This is why treating COVID was never really a choice between accurate point
+# forecasts and usable intervals. That trade-off only binds while the intervals
+# have to come from the fitted model's own sigma.
+#
+# HONEST VALIDATION. Quantiles are built on the first two thirds of the origins
+# and scored on the last third, so the coverage reported below is genuinely out
+# of sample. Fitting and scoring on the same origins would flatter the result.
+scored <- errs[!errs$Imputed, ]
 
-cat("\n--- How to read this ---\n")
-cat("* Mean_RMSE here is a far more reliable ranking than the single 12-month\n")
-cat("  test block, which cannot separate models within a few percent.\n")
-cat("* SD_RMSE shows how much each model's accuracy varies by origin. A small\n")
-cat("  mean difference against a large SD is not a real difference.\n")
+q_from <- function(df) {
+  do.call(rbind, lapply(split(df, list(df$Model, df$h), drop = TRUE), function(g) {
+    qs <- quantile(g$Error, c(0.025, 0.10, 0.90, 0.975), names = FALSE)
+    data.frame(Model = g$Model[1], h = g$h[1],
+               q025 = qs[1], q10 = qs[2], q90 = qs[3], q975 = qs[4],
+               n_origins = nrow(g), row.names = NULL)
+  }))
+}
+
+origins_sorted <- sort(unique(errs$Origin))
+cut_at    <- floor(length(origins_sorted) * 2 / 3)
+build_set <- origins_sorted[seq_len(cut_at)]
+score_set <- origins_sorted[-seq_len(cut_at)]
+
+q_build <- q_from(scored[scored$Origin %in% build_set, ])
+held    <- merge(scored[scored$Origin %in% score_set, ], q_build,
+                 by = c("Model", "h"))
+held$in80 <- held$Error >= held$q10  & held$Error <= held$q90
+held$in95 <- held$Error >= held$q025 & held$Error <= held$q975
+
+emp <- do.call(rbind, lapply(split(held, held$Model), function(g) {
+  data.frame(Model = g$Model[1],
+             Emp_Cov80 = mean(g$in80), Emp_Cov95 = mean(g$in95),
+             Points = nrow(g), row.names = NULL)
+}))
+
+score_rows <- rows[rows$Origin %in% score_set, ]
+gauss <- do.call(rbind, lapply(split(score_rows, score_rows$Model), function(g) {
+  data.frame(Model = g$Model[1],
+             Model_Cov80 = mean(g$Cov80, na.rm = TRUE),
+             Model_Cov95 = mean(g$Cov95, na.rm = TRUE),
+             row.names = NULL)
+}))
+
+cmp <- merge(gauss, emp, by = "Model")
+cmp <- cmp[order(abs(cmp$Emp_Cov80 - 0.80)), ]
+
+cat("\n=== INTERVAL CALIBRATION: MODEL-BASED vs EMPIRICAL ===\n")
+cat("Scored out of sample on the last", length(score_set),
+    "origins. Nominal 80% and 95%.\n\n")
+print(cmp, row.names = FALSE, digits = 4)
+
+cat("\nModel_Cov* are the intervals each model produces for itself. Emp_Cov* use\n")
+cat("the empirical error quantiles instead. Where the empirical column sits\n")
+cat("closer to nominal, quote the empirical interval and say how it was built.\n")
+cat("\nCAVEAT: with", length(build_set), "origins behind each quantile, the 2.5%\n")
+cat("and 97.5% points are crude - the 80% interval is much better determined\n")
+cat("than the 95% one. More origins would tighten both.\n")
+
+# Full-sample quantiles, for actually constructing intervals in the report.
+q_all <- q_from(scored)
+write.csv(q_all, "empirical_error_quantiles.csv", row.names = FALSE)
+
+cat("\nARIMA(2,1,2)+drift empirical error quantiles by horizon:\n")
+print(q_all[q_all$Model == "ARIMA(2,1,2)+drift",
+            c("h", "q10", "q90", "q025", "q975")],
+      row.names = FALSE, digits = 5)
+cat("Interval at horizon h = point forecast + [q10, q90]   for 80%\n")
+cat("                      = point forecast + [q025, q975] for 95%\n")
+
+cat("\n--- How to read all of this ---\n")
+cat("* Mean_RMSE across origins is a far more reliable ranking than the single\n")
+cat("  12-month test block, which cannot separate models within a few percent.\n")
+cat("* SD_RMSE shows how much each model varies by origin. A small mean gap\n")
+cat("  against a large SD is not a real difference.\n")
 cat("* No p-values: the 12-month windows overlap, so per-origin errors are\n")
-cat("  strongly autocorrelated and a paired t-test would overstate significance.\n")
-cat("* Coverage is now measured on hundreds of points rather than twelve, which\n")
-cat("  is the only way to tell a miscalibrated interval from a small sample.\n")
+cat("  autocorrelated and a paired t-test would overstate significance.\n")
 
 write.csv(agg, "rolling_cv_summary.csv", row.names = FALSE)
-cat("\nWrote rolling_cv_summary.csv and rolling_cv_by_origin.csv\n")
+write.csv(cmp, "rolling_cv_interval_calibration.csv", row.names = FALSE)
+cat("\nWrote rolling_cv_summary.csv, rolling_cv_by_origin.csv,\n")
+cat("rolling_cv_interval_calibration.csv and empirical_error_quantiles.csv\n")

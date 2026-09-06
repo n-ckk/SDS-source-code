@@ -157,11 +157,17 @@ dev.off()
 ljung_p <- unname(ljung_box$p.value)
 
 # 6. FINAL TEST EVALUATION - the test block is read only here
-test_metrics <- evaluate(parts$test$value, hw_model$mean)
+test_metrics <- evaluate(parts$test$value, hw_model$mean,
+                         exclude = parts$test$imputed)
 
 cat("\n=== FINAL TEST ACCURACY (2025-08 .. 2026-07) ===\n")
 print(round(test_metrics, 4))
 cat(sprintf("\nMASE uses the shared denominator %.2f from common.R, NOT the\n", MASE_DENOM))
+cat(sprintf("Scored on %d observed months; 2025-10 is excluded because it is\n",
+            unname(test_metrics["N"])))
+cat(sprintf("interpolated, not observed. Including it would give RMSE %.2f.\n",
+            unname(evaluate(parts$test$value, hw_model$mean)["RMSE"])))
+
 cat("per-model denominator forecast::accuracy() would compute from this\n")
 cat("script's own 2021+ window.\n")
 

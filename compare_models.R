@@ -52,12 +52,17 @@ actual   <- parts$test$value
 last_obs <- tail(parts$train_val$value, 1)
 tv       <- parts$train_val$value
 
+# Benchmarks must exclude the interpolated month too, or they are scored on a
+# different set of points than the models are.
+drop <- parts$test$imputed
+
 bench <- rbind(
-  `Naive (last value)` = evaluate(actual, rep(last_obs, HORIZON)),
-  `Seasonal naive`     = evaluate(actual, tail(tv, HORIZON)),
+  `Naive (last value)` = evaluate(actual, rep(last_obs, HORIZON), exclude = drop),
+  `Seasonal naive`     = evaluate(actual, tail(tv, HORIZON), exclude = drop),
   `RW with drift`      = evaluate(
     actual,
-    last_obs + (last_obs - tv[1]) / (length(tv) - 1) * seq_len(HORIZON))
+    last_obs + (last_obs - tv[1]) / (length(tv) - 1) * seq_len(HORIZON),
+    exclude = drop)
 )
 
 # ---- The table ---------------------------------------------------------------
@@ -73,6 +78,9 @@ cat(" MODEL COMPARISON - test window", format(TEST_START), "to",
 cat("================================================================\n")
 cat("All rows share one split and one MASE denominator (", round(MASE_DENOM, 2),
     ").\n", sep = "")
+cat("Scored on ", sum(!drop), " of ", HORIZON,
+    " test months: 2025-10 is interpolated, not observed,\n",
+    "and is excluded from every model AND every benchmark.\n", sep = "")
 cat("Ranked by test RMSE. Val_RMSE is shown so a model that only looks good on\n")
 cat("the test block is visible as such.\n\n")
 print(main, row.names = FALSE, digits = 5)
