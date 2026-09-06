@@ -9,10 +9,12 @@ BMMS2094, SDG 5 / SDG 8.
 **seasonally adjusted at source by BLS**, 1948-01 to 2026-07 (943 observations).
 
 That the series is already seasonally adjusted is the single most important fact
-about it. It is why `SARIMA.R` exists as a *test* for residual seasonality rather
-than as an assumed-seasonal model, why Holt-Winters fits `gamma` at essentially
-zero, and why MASE here is scaled by the lag-1 naive forecast rather than the
-seasonal one.
+about it. It is why Holt-Winters fits `gamma` at essentially zero, why MASE here
+is scaled by the lag-1 naive forecast rather than the seasonal one, and why
+`SARIMA.R` — which by design *requires* a seasonal term — ends up reporting a
+seasonal coefficient of 0.026 with p = 0.44. The seasonal structure is fitted
+because the model specification calls for it, not because the data carries it,
+and the script says so on every run.
 
 One month, **2025-10**, is blank at source and is filled by linear interpolation
 in `data_processing.R`. It falls inside the test window, so `data_processing.R`
@@ -47,7 +49,7 @@ Requires R with: `forecast`, `rugarch`, `tseries`, `zoo`, `dplyr`, `ggplot2`,
 | `data_processing.R` | Reads the workbook, completes the monthly grid, interpolates gaps, flags them, writes `processed_female_employment.csv` |
 | `common.R` | **Shared foundation** — the split, the metrics, the MASE denominators, the benchmarks, the analysis windows, the COVID regressors |
 | `auto_arima.R` | `auto.arima` order selection |
-| `SARIMA.R` | Seasonal ARIMA grid search — also the test for residual seasonality |
+| `SARIMA.R` | Seasonal ARIMA grid search with a **compulsory** seasonal term, ranked on validation RMSE |
 | `HoltWinter.R` | Holt-Winters additive, 2021+ window, plus a test of whether its seasonal terms earn their place |
 | `ARX-GARCH.R` | ARX with intervention dummies, fat tails and an optional GARCH(1,1) variance |
 | `compare_models.R` | Builds `model_comparison.csv` — the single-holdout table |
@@ -99,13 +101,23 @@ row is on standardised residuals of the *differenced* series. The table prints
 the lag and the df beside each p-value so this is visible. Read each row as a
 diagnostic of its own model, never as a ranking.
 
-**Identifiability is a gate.** An over-parameterised ARIMA can converge with a
-singular Hessian and return NaN standard errors; its coefficients, information
-criteria and prediction intervals are then all unusable. An earlier version
-selected such a model — and it had the best test RMSE in the group. Good holdout
-error does not make a degenerate model sound. `ARX-GARCH.R` carries the
-equivalent check for its own failure mode, a variance process on the IGARCH
-boundary, which finite standard errors do not detect.
+**Identifiability is reported on every model, and SARIMA fails it.** An
+over-parameterised ARIMA can converge with a singular Hessian and return NaN
+standard errors; its coefficients, information criteria and prediction intervals
+are then all unusable, while its point forecasts still compute normally.
+
+`SARIMA.R` ranks on validation RMSE and does not gate on this, by design — that
+is the selection rule the model owner chose. The consequence is that it selects
+SARIMA(4,1,3)(1,0,0)[12], which refits on train+validation with **five of its
+nine standard errors NaN**, and which has the best test RMSE in the group. Both
+things are true at once, and that is the point: good holdout error does not make
+a degenerate model sound. So for this model, **quote the point forecasts and the
+accuracy metrics; do not quote its intervals, its AIC/BIC, or its coefficient
+significance.** `SARIMA.R` section 6 prints this on every run, `sarima_result.csv`
+carries `Identifiable = FALSE`, and `compare_models.R` raises it as a warning.
+
+`ARX-GARCH.R` carries the equivalent check for its own failure mode, a variance
+process on the IGARCH boundary, which finite standard errors do not detect.
 
 **A residual diagnostic must have had power before its PASS counts.** The
 ARX-GARCH search qualified specifications on a Ljung-Box test of squared
@@ -164,16 +176,28 @@ Where the two disagree, the rolling result has more data behind it and the
 single-block result has cleaner provenance. Report both and say which you are
 quoting.
 
-They do disagree, and it matters. On the single block, ARX-GARCH and Holt-Winters
-both beat the random-walk-with-drift benchmark. Across 24 origins both are
-**worse** than it, and only ARIMA(2,1,2) with drift beats it consistently. The
-single block was flattering them.
+They do disagree, and it matters in two places.
 
-Note also that `auto_arima.R` and `SARIMA.R` select the *same* specification —
-ARIMA(2,1,2) with drift. `compare_models.R` detects this from the `Spec` column
-and says so, and `rolling_cv.R` collapses them into one entry. They are one model
-reached by two search procedures, not two independent results, and should not be
-reported as though they corroborate each other.
+**The benchmark.** On the single block, ARX-GARCH and Holt-Winters both beat the
+random-walk-with-drift benchmark. Across 24 origins both are **worse** than it,
+and only the two ARIMA-family models beat it consistently. The single block was
+flattering them.
+
+**SARIMA's lead.** On the single block SARIMA(4,1,3)(1,0,0)[12] has the best test
+RMSE in the group, 3.7% ahead of ARIMA(2,1,2) with drift. Across 24 origins the
+two are indistinguishable — 406.1 against 405.6 mean RMSE, a 0.1% gap, with
+SARIMA the *more* variable of the pair (SD 95.7 against 90.5). The eleven-point
+lead is not evidence of a better model. Quote it if you report the single block,
+but do not build a conclusion on it.
+
+`auto_arima.R` and `SARIMA.R` search overlapping spaces and differ in two ways at
+once: SARIMA requires a seasonal term, and it ranks on validation RMSE where
+`auto.arima` ranks on an information criterion. Either difference alone would be
+enough to make them disagree, so their results are not independent confirmations
+of each other. `SARIMA.R` section 7 prints the best non-seasonal candidate under
+*each* ranking rule, so the two effects can be read apart: on validation RMSE it
+is SARIMA(4,1,4)(0,0,0)[12], on AICc it is SARIMA(2,1,2)(0,0,0)[12] — the model
+`auto_arima.R` reports.
 
 ## Which numbers to quote
 
@@ -186,7 +210,9 @@ margin over the RW benchmark is an estimator difference, not a modelling one.
 **Prediction intervals** — from `empirical_error_quantiles.csv`, not from any
 model's own. Every model's intervals come out too wide, for different reasons:
 the ARIMA family's sigma is inflated by the April 2020 outlier and its normal
-quantile is wrong given the residual kurtosis; ARX-GARCH's variance process sits
+quantile is wrong given the residual kurtosis; SARIMA's are worse still, because
+its singular Hessian means they have no valid basis at all and not merely a
+miscalibrated one; ARX-GARCH's variance process sits
 on the IGARCH boundary with a Student-t shape near 3, so its simulated paths fan
 out too fast (100% coverage at both the 80% and 95% level on the test block).
 `rolling_cv.R` validates the empirical quantiles out of sample and reports both
