@@ -25,24 +25,29 @@
 #     only gate. is_identifiable() in common.R now rejects such fits.
 #
 # (3) Ranking is on AICc, not validation RMSE. The validation block is twelve
-#     observations. The earlier run had 113 qualifying models spanning 390.4 to
-#     397.3 validation RMSE - a 1.8% spread, which on twelve points is noise.
-#     Ranking on it means picking the luckiest of 113. AICc is computed on 919
-#     observations and is far more stable. The validation block still does real
-#     work through the qualification step and as the honest cross-check printed
-#     below.
+#     observations, and the earlier run had 113 qualifying models spanning a 1.8%
+#     validation-RMSE range - noise on twelve points. AICc is computed on 919
+#     observations and is far more stable.
+#
+# WHAT THE VALIDATION BLOCK ACTUALLY DOES HERE - honestly stated.
+# NOTHING in the selection. An earlier version of this header claimed the
+# validation block "does real work through the qualification step"; it does not.
+# Qualification is Ljung-Box plus identifiability, both computed IN SAMPLE on the
+# training fit, and ranking is on in-sample AICc. This is in substance a two-way
+# split with an in-sample selection criterion. The validation block's only roles
+# are the cross-check printed in section 5 and the genuinely out-of-sample
+# Val_RMSE that reaches the comparison table. That is still worth having - it is
+# just not model selection, and calling it selection overstated the design.
 #
 # COVID. The primary search carries NO intervention dummies. Treating the 2020
-# break was tested across four intervention windows with and without seasonal
-# terms: it cuts the 26-sigma April 2020 residual to about 7 and the excess
-# kurtosis from 494 to 10, and it makes the point forecasts worse in every
-# configuration tried - the best dummied variant is still worse than a random
-# walk with drift. Residual quality and accuracy move in opposite directions and
-# no configuration achieves both. The primary model is therefore the accurate one
-# and its Gaussian prediction intervals are NOT trustworthy; quote its point
-# forecasts, not its intervals. Section 12 fits the dummied alternative as a
-# labelled sensitivity. ARX-GARCH.R gets both right, because in difference space
-# the COVID event genuinely is four large spikes.
+# break cuts the ~26-sigma April 2020 residual to about 7 and the excess kurtosis
+# by roughly an order of magnitude, and makes the point forecasts worse. Residual
+# quality and accuracy move in opposite directions and no configuration achieves
+# both. The primary model is therefore the accurate one and its Gaussian
+# prediction intervals are NOT trustworthy; quote its point forecasts, not its
+# intervals. Section 12 MEASURES the trade-off on every run rather than quoting
+# it from prose - see sarima_covid_sensitivity.csv. For calibrated intervals use
+# the empirical error quantiles from rolling_cv.R.
 # ==============================================================================
 
 library(forecast)
@@ -74,28 +79,41 @@ cat("D =", D, " (0 means no seasonal differencing is required)\n")
 
 # 3. HELPER: Ljung-Box p-value with the right degrees of freedom
 get_ljung_p <- function(model, p, q, P, Q) {
-  res <- residuals(model)
-  res <- res[is.finite(res)]
-
-  model_df  <- p + q + P + Q
-  lag_value <- min(24, floor(length(res) / 5))
-  lag_value <- max(lag_value, model_df + 3)
-  lag_value <- min(lag_value, length(res) - 1)
-
-  if (lag_value <= model_df) return(NA_real_)
-
-  Box.test(res, lag = lag_value, type = "Ljung-Box", fitdf = model_df)$p.value
+  ljung_box(residuals(model), fitdf = p + q + P + Q,
+            on = "level residuals")$p
 }
 
-# 4. SPECIFICATION SEARCH - FIT ON TRAIN, QUALIFY ON VALIDATION
+# 4. SPECIFICATION SEARCH - FIT ON TRAIN, SCORE ON VALIDATION
 # P and Q are allowed to be zero, so a non-seasonal model can win.
 # The grid is 225 maximum-likelihood fits and takes 15-30 minutes. It is cached
 # so that re-running the selection, the refit or the reporting below does not pay
-# for it again. Delete sarima_model_selection.csv, or set SARIMA_REFRESH=TRUE, to
-# force a fresh search.
+# for it again.
+#
+# THE CACHE IS FINGERPRINTED. It previously had no record of what it was built
+# from, so changing VAL_START, TEST_START, the data or the MASE denominator left
+# a stale table on disk that the script would happily reuse - every cached
+# Validation_RMSE and AICc silently describing a different question from the one
+# being asked. The fingerprint below covers the split boundaries and the training
+# data itself; a mismatch forces a fresh search instead of a wrong answer.
 SEARCH_CACHE <- "sarima_model_selection.csv"   # primary search, no dummies
-refresh <- !file.exists(SEARCH_CACHE) ||
-  isTRUE(as.logical(Sys.getenv("SARIMA_REFRESH", "FALSE")))
+
+fingerprint <- sprintf("val=%s;test=%s;freq=%d;n=%d;s1=%.4f;s2=%.4f;d=%d;D=%d",
+                       format(VAL_START), format(TEST_START), FREQ,
+                       length(train_ts), sum(train_ts), sum(train_ts^2), d, D)
+
+cache_ok <- FALSE
+if (file.exists(SEARCH_CACHE)) {
+  cached <- read.csv(SEARCH_CACHE, stringsAsFactors = FALSE)
+  cache_ok <- !is.null(cached$Fingerprint) &&
+    nrow(cached) > 0 &&
+    identical(as.character(cached$Fingerprint[1]), fingerprint)
+  if (!cache_ok) {
+    cat("\nCached search in", SEARCH_CACHE, "does not match the current data or\n")
+    cat("split (missing or stale fingerprint). Re-running the grid.\n")
+  }
+}
+
+refresh <- !cache_ok || isTRUE(as.logical(Sys.getenv("SARIMA_REFRESH", "FALSE")))
 
 candidate_table <- data.frame()
 candidate_id    <- 0
@@ -103,16 +121,8 @@ candidate_id    <- 0
 if (!refresh) {
 
   cat("\nReusing cached search from", SEARCH_CACHE, "\n")
-  cat("Set SARIMA_REFRESH=TRUE or delete it to re-run the grid.\n")
-  candidate_table <- read.csv(SEARCH_CACHE, stringsAsFactors = FALSE)
-
-  # A cache written before Validation_MASE existed can be upgraded in place:
-  # MASE is exactly MAE divided by the shared denominator.
-  if (is.null(candidate_table$Validation_MASE)) {
-    candidate_table$Validation_MASE <- candidate_table$Validation_MAE / MASE_DENOM
-    cat("Backfilled Validation_MASE from Validation_MAE / ", round(MASE_DENOM, 2),
-        ".\n", sep = "")
-  }
+  cat("Fingerprint matches. Set SARIMA_REFRESH=TRUE or delete it to re-run.\n")
+  candidate_table <- cached
 
 } else {
 
@@ -161,9 +171,9 @@ for (p in 0:4) {
           Validation_RMSE = unname(val_acc["RMSE"]),
           Validation_MAE  = unname(val_acc["MAE"]),
           Validation_MAPE = unname(val_acc["MAPE"]),
-          Validation_MASE = unname(val_acc["MASE"]),
           Ljung_Box_p     = lb_p,
           AIC = fit$aic, AICc = fit$aicc, BIC = fit$bic,
+          Fingerprint     = fingerprint,
           stringsAsFactors = FALSE
         ))
       }
@@ -177,18 +187,29 @@ write.csv(candidate_table, SEARCH_CACHE, row.names = FALSE)
 
 if (nrow(candidate_table) == 0) stop("No SARIMA candidate could be fitted.")
 
+# MASE columns are DERIVED, never cached. MASE is MAE divided by a denominator
+# that lives in common.R, so recomputing it here means a change to that
+# denominator propagates into the cached table instead of being silently ignored.
+candidate_table$Validation_MASE   <- candidate_table$Validation_MAE / MASE_DENOM
+candidate_table$Validation_MASE_s <- candidate_table$Validation_MAE / MASE_DENOM_S
+
+cat("Candidates in table  :", nrow(candidate_table), "of 225 attempted",
+    sprintf("(%d specifications failed to converge)\n", 225 - nrow(candidate_table)))
+
 # 5. MODEL SELECTION RULE - stated up front, applied mechanically
 #
 #   QUALIFY  Ljung-Box p > 0.05  AND  finite standard errors (identifiable)
 #   RANK     lowest AICc among the qualifiers
 #
-# The test block plays no part in any of this.
+# Both are IN-SAMPLE criteria computed on the training fit. Neither the
+# validation block nor the test block plays any part.
 cat("\n=== MODEL SELECTION PROCESS ===\n")
 cat("Candidates fitted    :", nrow(candidate_table), "\n")
 cat("Unidentifiable       :", sum(!candidate_table$Identifiable),
     "(rejected: NaN standard errors)\n")
-cat("Qualification        : Ljung-Box p > 0.05 AND identifiable\n")
-cat("Ranking              : lowest AICc\n")
+cat("Qualification        : Ljung-Box p > 0.05 AND identifiable (both in-sample)\n")
+cat("Ranking              : lowest AICc (in-sample)\n")
+cat("Validation block     : NOT used for selection - cross-check only\n")
 
 qualified <- candidate_table[
   is.finite(candidate_table$Ljung_Box_p) &
@@ -241,12 +262,10 @@ if (selected$P + selected$Q == 0) {
 }
 
 # 7. REFIT ON TRAIN + VALIDATION, WALKING DOWN THE RANKING IF NECESSARY
-# A specification that converged on the 919-month training block can still fail
-# to refit on the 931-month train+validation block - optim() reports
-# "non-finite finite-difference value" - or can come back unidentifiable. That is
-# a property of the high-order specifications an AICc ranking favours, and it
-# happened to the top-ranked model on this data. Walk down the ranking until one
-# refits cleanly, and report which rank was actually used.
+# A specification that converged on the training block can still fail to refit on
+# the longer train+validation block - optim() reports "non-finite
+# finite-difference value" - or can come back unidentifiable. Walk down the
+# ranking until one refits cleanly, and report which rank was actually used.
 refit_on <- function(row, series, xreg = NULL) {
   tryCatch(
     Arima(series,
@@ -309,13 +328,15 @@ print(parameter_table, row.names = FALSE, digits = 5)
 write.csv(parameter_table, "sarima_final_parameters.csv", row.names = FALSE)
 
 # 8. FINAL RESIDUAL DIAGNOSTICS
-final_ljung_p <- get_ljung_p(final_model, selected$p, selected$q,
-                             selected$P, selected$Q)
+lb <- ljung_box(residuals(final_model),
+                fitdf = selected$p + selected$q + selected$P + selected$Q,
+                on = "level residuals")
 
 cat("\n=== FINAL RESIDUAL DIAGNOSTIC ===\n")
-cat("Ljung-Box p-value:", final_ljung_p, "\n")
+cat(sprintf("Ljung-Box: lag = %d, df = %d, n = %d, p = %.4f\n",
+            lb$lag, lb$df, lb$n, lb$p))
 cat("Interpretation:",
-    ifelse(is.finite(final_ljung_p) && final_ljung_p > 0.05,
+    ifelse(is.finite(lb$p) && lb$p > 0.05,
            "no significant residual autocorrelation detected.",
            "residual autocorrelation may remain."), "\n")
 
@@ -328,23 +349,35 @@ dev.off()
 test_fc <- forecast(final_model, h = HORIZON, level = c(80, 95))
 
 # Validation metrics were recorded during the search (train-only fit), so they
-# are read from the table rather than recomputed.
-val_metrics  <- c(RMSE = selected$Validation_RMSE,
-                  MAE  = selected$Validation_MAE,
-                  MAPE = selected$Validation_MAPE,
-                  MASE = selected$Validation_MASE,
-                  N    = HORIZON)
+# are read from the table rather than recomputed. The SELECTED row's orders were
+# refitted unchanged on train+validation above, so - unlike auto_arima.R, which
+# re-runs its whole selection - the Val_RMSE below does belong to the reported
+# specification.
+val_metrics  <- c(RMSE   = selected$Validation_RMSE,
+                  MAE    = selected$Validation_MAE,
+                  MAPE   = selected$Validation_MAPE,
+                  MASE   = selected$Validation_MASE,
+                  MASE_s = selected$Validation_MASE_s,
+                  N      = HORIZON)
 test_metrics <- evaluate(parts$test$value, test_fc$mean,
                          exclude = parts$test$imputed)
 
 cat("\n=== FINAL TEST ACCURACY (2025-08 .. 2026-07) ===\n")
 print(round(test_metrics, 4))
-cat(sprintf("\nMASE uses the shared denominator %.2f from common.R.\n", MASE_DENOM))
+cat(sprintf("\nMASE uses the shared lag-1 denominator %.2f from common.R;\n",
+            MASE_DENOM))
+cat(sprintf("MASE_s uses the seasonal-naive denominator %.2f and is never quoted alone.\n",
+            MASE_DENOM_S))
 cat(sprintf("Scored on %d observed months; 2025-10 is excluded because it is\n",
             unname(test_metrics["N"])))
 cat(sprintf("interpolated, not observed. Including it would give RMSE %.2f.\n",
             unname(evaluate(parts$test$value, test_fc$mean)["RMSE"])))
 
+bench <- benchmark_table()
+cat("\nAgainst the shared benchmarks (same scored months):\n")
+print(round(bench[, c("RMSE", "MAE", "MASE")], 3))
+cat(sprintf("Test RMSE vs RW-with-drift: %+.1f%%  (negative = model is better)\n",
+            100 * (test_metrics["RMSE"] / bench["RW with drift", "RMSE"] - 1)))
 
 save_model_result(
   model_id     = MODEL_ID,
@@ -354,11 +387,15 @@ save_model_result(
   n_train_val  = nrow(parts$train_val),
   val_metrics  = val_metrics,
   test_metrics = test_metrics,
-  ljung_p      = final_ljung_p,
+  lb           = lb,
   identifiable = identifiable,
   aic          = final_model$aic,
   bic          = final_model$bic,
-  notes        = sprintf("ranked on AICc among %d qualifiers; seasonal=%s",
+  spec         = sprintf("kind=arima;p=%d;d=%d;q=%d;P=%d;D=%d;Q=%d;drift=%s",
+                         selected$p, selected$d, selected$q,
+                         selected$P, selected$D, selected$Q,
+                         selected$d == 1 && selected$D == 0),
+  notes        = sprintf("ranked on in-sample AICc among %d qualifiers; seasonal=%s",
                          nrow(qualified), selected$P + selected$Q > 0)
 )
 
@@ -377,6 +414,8 @@ test_forecast_table <- data.frame(
 
 cat("\nTest forecast (Imputed = actual is interpolated, not observed):\n")
 print(test_forecast_table, row.names = FALSE, digits = 6)
+cat("The intervals are the model's own Gaussian ones and are NOT calibrated on\n")
+cat("this fit - use empirical_error_quantiles.csv from rolling_cv.R instead.\n")
 
 write.csv(test_forecast_table, "sarima_final_test_forecast.csv",
           row.names = FALSE)
@@ -391,7 +430,8 @@ lines(as_monthly_ts(parts$test), lwd = 2)
 dev.off()
 
 # 11. REFIT ON FULL DATA + FUTURE 12-MONTH FORECAST
-# Same failure mode as the train+validation refit, so the same guard.
+# The SELECTED orders are refitted, not re-searched, so the forward forecast
+# comes from the same specification whose accuracy was measured above.
 full_model <- refit_on(selected, full_ts)
 
 if (is.null(full_model)) {
@@ -402,7 +442,7 @@ if (is.null(full_model)) {
 }
 
 future_dates <- seq(
-  from = seq(max(data$date), by = "month", length.out = 2)[2],
+  from = month_add(max(data$date), 1),
   by = "month", length.out = HORIZON
 )
 
@@ -421,6 +461,8 @@ if (!is.null(full_model)) {
 
   cat("\n=== 12-MONTH AHEAD FORECAST (beyond the observed sample) ===\n")
   print(future_table, row.names = FALSE, digits = 6)
+  cat("Intervals are the model's own Gaussian ones - NOT calibrated. Use the\n")
+  cat("empirical quantiles from rolling_cv.R for intervals worth quoting.\n")
 
   write.csv(future_table, "sarima_future_12_month_forecast.csv", row.names = FALSE)
 
@@ -438,9 +480,10 @@ if (!is.null(full_model)) {
 # 12. SENSITIVITY: WHAT COVID INTERVENTION DUMMIES COST AND BUY
 #
 # Not the reported model. The SELECTED orders are refitted with the intervention
-# dummies rather than re-running the whole 225-model search, so this costs one
-# extra fit. It exists so the trade-off stated in the header is visible in the
-# output instead of merely asserted.
+# dummies rather than re-running the whole 225-model search, so this is a
+# CONTROLLED comparison - one thing changes - and costs one extra fit. It exists
+# so the trade-off stated in the header is measured on every run instead of being
+# quoted from prose that can go stale.
 # ==============================================================================
 cat("\n\n=== SENSITIVITY: COVID DUMMIES (not the reported model) ===\n")
 
@@ -465,7 +508,7 @@ if (is.null(sens_model)) {
     Model         = c(selected$Model, paste(selected$Model, "+ AO")),
     Test_RMSE     = c(test_metrics["RMSE"], sens_metrics["RMSE"]),
     Test_MAE      = c(test_metrics["MAE"],  sens_metrics["MAE"]),
-    Test_MAPE     = c(test_metrics["MAPE"], sens_metrics["MAPE"]),
+    Test_MASE     = c(test_metrics["MASE"], sens_metrics["MASE"]),
     Max_abs_z     = c(prim_resid["max_abs_z"], sens_resid["max_abs_z"]),
     Kurtosis      = c(prim_resid["kurtosis"],  sens_resid["kurtosis"]),
     row.names     = NULL
@@ -473,9 +516,14 @@ if (is.null(sens_model)) {
 
   print(comparison, row.names = FALSE, digits = 5)
 
-  cat("\nThe dummies cut the largest standardised residual and the excess",
-      "\nkurtosis by an order of magnitude - which is what makes Gaussian",
-      "\nprediction intervals meaningful - and cost point accuracy to do it.\n")
+  cat(sprintf("\nThe dummies cost %.1f RMSE (%+.1f%%) and cut max|z| from %.1f to %.1f\n",
+              sens_metrics["RMSE"] - test_metrics["RMSE"],
+              100 * (sens_metrics["RMSE"] / test_metrics["RMSE"] - 1),
+              prim_resid["max_abs_z"], sens_resid["max_abs_z"]))
+  cat(sprintf("and excess kurtosis from %.0f to %.1f - which is what makes Gaussian\n",
+              prim_resid["kurtosis"], sens_resid["kurtosis"]))
+  cat("prediction intervals meaningful. This is a controlled comparison: the\n")
+  cat("orders are identical and only the dummies change.\n")
 
   write.csv(comparison, "sarima_covid_sensitivity.csv", row.names = FALSE)
 
@@ -485,13 +533,17 @@ if (is.null(sens_model)) {
     window_start = min(parts$all$date),
     n_train      = nrow(parts$train),
     n_train_val  = nrow(parts$train_val),
-    val_metrics  = setNames(rep(NA_real_, 4), c("RMSE", "MAE", "MAPE", "MASE")),
+    val_metrics  = setNames(rep(NA_real_, 3), c("RMSE", "MAE", "MAPE")),
     test_metrics = sens_metrics,
-    ljung_p      = NA_real_,
+    lb           = ljung_box(residuals(sens_model),
+                             fitdf = selected$p + selected$q +
+                                     selected$P + selected$Q,
+                             on = "level residuals"),
     identifiable = is_identifiable(sens_model),
     aic          = sens_model$aic,
     bic          = sens_model$bic,
-    notes        = "SENSITIVITY ONLY - not the reported model"
+    spec         = NA_character_,
+    notes        = "SENSITIVITY ONLY - controlled (same orders as primary)"
   )
 }
 

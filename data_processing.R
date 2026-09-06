@@ -57,10 +57,34 @@ print(colSums(is.na(data)))
 data <- data %>%
   filter(!is.na(date))
 
+# Put the data on a COMPLETE monthly grid before doing anything else.
+#
+# Everything downstream builds a ts() by counting forward from the first date at
+# frequency 12, which has no way to notice an absent month: one missing ROW would
+# shift every later observation back by one and silently mis-date the entire
+# series, the split, and every forecast. This script only ever dropped rows with
+# a missing DATE, so a gap in the workbook would have passed straight through.
+# Re-indexing onto the full grid turns any missing row into a missing VALUE,
+# which the interpolation below handles and the `imputed` flag records.
+# common.R::load_series() re-checks the grid and refuses to load a broken one.
+full_grid <- data.frame(date = seq(min(data$date), max(data$date), by = "month"))
+n_before  <- nrow(data)
+data <- full_grid %>%
+  left_join(data, by = "date") %>%
+  arrange(date)
+
+if (nrow(data) > n_before) {
+  cat("\nRows added to complete the monthly grid:", nrow(data) - n_before, "\n")
+  cat("Missing months were:",
+      paste(format(data$date[is.na(data$female_employment)]), collapse = ", "),
+      "\n")
+}
+
 # Record which months are interpolated BEFORE filling them. This flag is written
 # to the CSV so every downstream model can report - or exclude - synthetic points
 # instead of re-deriving the flag and getting it wrong. 2025-10 is blank at source
-# (it falls inside every model's test window, so it is scored as if observed).
+# and falls inside every model's test window; common.R::evaluate() excludes it
+# from every score, for models and benchmarks alike.
 data$imputed <- is.na(data$female_employment)
 
 # Fill missing female employment values using linear interpolation

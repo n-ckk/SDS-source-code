@@ -3,21 +3,28 @@
 # SDG 5: Gender Equality
 # Dataset: LNS12000002 - Employment Level: Women
 #
-# Split, metrics and the MASE denominator come from common.R. Do not redefine
-# them here - divergent copies of exactly those three things are what made the
-# earlier comparison table misleading.
+# Split, metrics, MASE denominators, benchmarks and the analysis window all come
+# from common.R. Do not redefine them here - divergent copies of exactly those
+# things are what made the earlier comparison table misleading.
 #
 # WINDOW. The 2020 collapse is a structural break, not a trend. Holt-Winters has
 # no mechanism for a level shift of that size and no way to carry an intervention
-# regressor, so this model starts in January 2021 and simply avoids it. That is a
-# legitimate choice, but it means this model is fitted on 55 months against the
-# 943 available to the ARIMA models - which is why AIC, BIC and any per-model
-# MASE are not comparable across scripts, and why common.R fixes one MASE
-# denominator for everyone.
+# regressor, so this model starts at HW_WINDOW_START (2021-01) and simply avoids
+# it. That is a legitimate choice, but it means this model is fitted on 55 months
+# against the 943 available to the ARIMA models - which is why AIC, BIC and any
+# per-model MASE are not comparable across scripts, and why common.R fixes one
+# MASE denominator for everyone.
 #
-# SEASONALITY. LNS12000002 is seasonally adjusted at source, so the fitted gamma
-# comes out at essentially zero and the seasonal indices are frozen rather than
-# evolving. Reported below as a limitation, not hidden.
+# SEASONALITY - AND WHY THE SEASONAL TERMS ARE PROBABLY DOING HARM.
+# LNS12000002 is seasonally adjusted at source, so the fitted gamma comes out at
+# about 1e-4: the seasonal indices are frozen at their initial values rather than
+# evolving. That is not a harmless curiosity. Eleven free seasonal initial states
+# are still estimated, on 43 training observations, and the resulting frozen
+# offsets span roughly 450 thousand persons - larger than this model's own test
+# RMSE. They are visible as a spurious step in the forward forecast. Section 10
+# therefore fits ETS(A,A,N) - Holt's linear trend, the same model without the
+# seasonal component - and reports both. If Holt wins, the seasonal terms were
+# fitting noise and the report should say so.
 # ============================================================
 
 # 1. Load Packages
@@ -28,7 +35,7 @@ library(forecast)
 source("common.R")
 
 MODEL_ID     <- "holt_winters"
-WINDOW_START <- as.Date("2021-01-01")
+WINDOW_START <- HW_WINDOW_START   # defined in common.R; rolling_cv.R reads it too
 
 # The Metrics package exports its own accuracy(), rmse(), mae() and mape(). If it
 # is attached in the same session it masks the forecast versions and this script
@@ -40,13 +47,6 @@ if ("package:Metrics" %in% search()) {
 }
 
 # 2. Read Processed Data and Split
-# NOTE: no calendar repair is done here any more. data_processing.R keeps every
-# month on the grid and flags the ones it interpolated in the 'imputed' column,
-# so common.R can report them directly. The previous version of this script
-# rebuilt the calendar on the belief that data_processing.R dropped whole rows
-# for missing values - it does not, it only drops rows with a missing DATE - and
-# because the repair was a no-op it reported "imputed months in test set: 0" even
-# though 2025-10 is interpolated.
 data  <- load_series()
 parts <- split_series(data, WINDOW_START)
 describe_split(parts, "Holt-Winters (2021+ window)")
@@ -82,24 +82,51 @@ cat("BIC :", hw_model$model$bic, "\n")
 cat("NOTE: these are computed on", nrow(parts$train_val), "observations and are",
     "NOT comparable\n      with the ARIMA scripts' AIC/BIC.\n")
 
-# Final seasonal indices, one per month
-seasonal_columns <- grep("^s", colnames(hw_model$model$states))
-seasonal_indices <- data.frame(
-  month = month.abb,
-  index = round(as.numeric(tail(hw_model$model$states[, seasonal_columns], 1)), 2)
-)
+# Final seasonal indices, one per month.
+#
+# THE COLUMN ORDER IS NOT JANUARY-TO-DECEMBER. An ETS state row stores the
+# seasonal vector in REVERSE chronological order: at the last row, column s1 is
+# the index for the most recent observation, s2 the one before it, and so on back
+# to s12. This script used to paste month.abb straight onto s1..s12, which
+# labelled every index with the wrong month - with the series ending in July, s1
+# is July and s12 is the following August, so the printed table was effectively
+# reversed. Derive the months from the series end instead of assuming.
+last_obs_date    <- max(parts$train_val$date)
+seasonal_columns <- grep("^s[0-9]+$", colnames(hw_model$model$states))
+seasonal_values  <- as.numeric(tail(hw_model$model$states[, seasonal_columns], 1))
+seasonal_dates   <- seq(last_obs_date, by = "-1 month",
+                        length.out = length(seasonal_values))
 
-cat("\nFinal Seasonal Indices (Thousands):\n")
+seasonal_indices <- data.frame(
+  state = colnames(hw_model$model$states)[seasonal_columns],
+  month = format(seasonal_dates, "%b"),
+  index = round(seasonal_values, 2),
+  stringsAsFactors = FALSE
+)
+# Present in calendar order, which is what a reader expects.
+seasonal_indices <- seasonal_indices[order(match(seasonal_indices$month,
+                                                 month.abb)), ]
+
+cat("\nFinal Seasonal Indices (Thousands), in calendar order:\n")
+cat("(the 'state' column shows which ETS state each index came from - s1 is the\n")
+cat(" most recent month,", format(last_obs_date, "%b %Y"),
+    ", not January)\n")
 print(seasonal_indices, row.names = FALSE)
+cat(sprintf("Range: %.1f to %.1f  (spread %.1f)\n",
+            min(seasonal_values), max(seasonal_values),
+            diff(range(seasonal_values))))
 
 # A gamma at or near zero means the seasonal indices are held constant rather
-# than updated over time. LNS12000002 is seasonally adjusted at source, so this
-# is the expected result and is reported as a limitation.
+# than updated over time.
 if (hw_model$model$par["gamma"] < 0.01) {
-  cat("\nNote: gamma is effectively zero. The seasonal component is fixed rather",
-      "\nthan evolving, consistent with a pre-adjusted series. Holt-Winters is",
-      "\ntherefore operating as Holt's linear trend method with a frozen",
-      "\nseasonal offset.\n")
+  cat("\nNote: gamma is effectively zero. The seasonal component is FROZEN at its",
+      "\nestimated initial values rather than evolving, consistent with a series",
+      "\nthat BLS has already seasonally adjusted. Holt-Winters is operating as",
+      "\nHolt's linear trend method plus a fixed offset pattern - and that pattern",
+      "\nstill costs 11 estimated parameters and injects a spread of",
+      sprintf("%.0f", diff(range(seasonal_values))),
+      "\nthousand persons into the forecast. Section 10 tests whether it earns",
+      "\nits place.\n")
 }
 
 # 5. Residual Diagnostics
@@ -111,37 +138,34 @@ if (hw_model$model$par["gamma"] < 0.01) {
 # parameters the model estimated - here 3 smoothing parameters plus 13 initial
 # states. It also caps the test at floor(n/5) lags, which on this window is 11.
 # The result is a lenient test whose PASS is weak evidence. There is no settled
-# df correction for ETS, so rather than pick one silently, both bounds are
-# reported: df = 0 (the package default, most lenient) and df = 3 (deducting the
-# smoothing parameters, stricter). If the verdict differs between them, say so in
-# the report instead of quoting whichever one passes.
-ljung_box <- checkresiduals(hw_model, plot = FALSE)
-
+# df correction for ETS, so both bounds are reported: df = 0 (the package
+# default, most lenient) and df = 3 (deducting the smoothing parameters).
+#
+# The STRICTER of the two is what goes into the comparison table. The earlier
+# version computed both, warned if they disagreed, and then saved the lenient
+# one - discarding the work and putting the most flattering number in the shared
+# table.
 hw_resid <- residuals(hw_model)
 hw_resid <- hw_resid[is.finite(hw_resid)]
-lb_lag   <- min(2 * FREQ, floor(length(hw_resid) / 5))
 
-lb_table <- do.call(rbind, lapply(c(0, 3), function(k) {
-  bt <- Box.test(hw_resid, lag = lb_lag, type = "Ljung-Box", fitdf = k)
-  data.frame(fitdf   = k,
-             lag     = lb_lag,
-             Q       = unname(bt$statistic),
-             df      = unname(bt$parameter),
-             p_value = unname(bt$p.value),
-             verdict = ifelse(bt$p.value > 0.05, "PASS", "FAIL"),
-             row.names = NULL)
-}))
+lb_variants <- lapply(c(0, 3), function(k)
+  ljung_box(hw_resid, fitdf = k, on = "level residuals"))
 
-cat("\nLjung-Box on Holt-Winters residuals at lag", lb_lag, "\n")
+lb_table <- do.call(rbind, lapply(lb_variants, function(v)
+  data.frame(fitdf = v$fitdf, lag = v$lag, chisq_df = v$df, p_value = v$p,
+             verdict = ifelse(v$p > 0.05, "PASS", "FAIL"),
+             row.names = NULL)))
+
+cat("\nLjung-Box on Holt-Winters residuals\n")
 cat("(df = 0 is the forecast package default for ETS; df = 3 deducts the",
-    "\nsmoothing parameters. No settled correction exists - both are shown.)\n")
+    "\nsmoothing parameters. No settled correction exists - both are shown, and",
+    "\nthe STRICTER one is what reaches model_comparison.csv.)\n")
 print(lb_table, row.names = FALSE, digits = 5)
 
 cat("\nParameters actually estimated: 3 smoothing +",
     length(hw_model$model$par) - 3, "initial states =",
-    length(hw_model$model$par), "\n")
-cat("On", length(hw_resid), "observations this test has little power either way;",
-    "\ntreat a PASS as weak evidence, not as confirmation.\n")
+    length(hw_model$model$par), "on", length(hw_resid), "observations.\n")
+cat("This test has little power either way; treat a PASS as weak evidence.\n")
 
 if (length(unique(lb_table$verdict)) > 1) {
   cat("\nWARNING: the two df conventions DISAGREE. Report both.\n")
@@ -154,7 +178,7 @@ png("holt_winters_residual_diagnostics.png",
 checkresiduals(hw_model)
 dev.off()
 
-ljung_p <- unname(ljung_box$p.value)
+lb <- lb_variants[[which.min(vapply(lb_variants, function(v) v$p, 0))]]
 
 # 6. FINAL TEST EVALUATION - the test block is read only here
 test_metrics <- evaluate(parts$test$value, hw_model$mean,
@@ -162,14 +186,22 @@ test_metrics <- evaluate(parts$test$value, hw_model$mean,
 
 cat("\n=== FINAL TEST ACCURACY (2025-08 .. 2026-07) ===\n")
 print(round(test_metrics, 4))
-cat(sprintf("\nMASE uses the shared denominator %.2f from common.R, NOT the\n", MASE_DENOM))
+cat(sprintf("\nMASE uses the shared lag-1 denominator %.2f from common.R, NOT the\n",
+            MASE_DENOM))
+cat("per-model denominator forecast::accuracy() would compute from this script's\n")
+cat("own 2021+ window. MASE_s uses the seasonal-naive denominator",
+    sprintf("%.2f", MASE_DENOM_S), "and\n")
+cat("is reported alongside it, never on its own.\n")
 cat(sprintf("Scored on %d observed months; 2025-10 is excluded because it is\n",
             unname(test_metrics["N"])))
 cat(sprintf("interpolated, not observed. Including it would give RMSE %.2f.\n",
             unname(evaluate(parts$test$value, hw_model$mean)["RMSE"])))
 
-cat("per-model denominator forecast::accuracy() would compute from this\n")
-cat("script's own 2021+ window.\n")
+bench <- benchmark_table()
+cat("\nAgainst the shared benchmarks (same scored months):\n")
+print(round(bench[, c("RMSE", "MAE", "MASE")], 3))
+cat(sprintf("Test RMSE vs RW-with-drift: %+.1f%%  (negative = model is better)\n",
+            100 * (test_metrics["RMSE"] / bench["RW with drift", "RMSE"] - 1)))
 
 save_model_result(
   model_id     = MODEL_ID,
@@ -179,11 +211,13 @@ save_model_result(
   n_train_val  = nrow(parts$train_val),
   val_metrics  = val_metrics,
   test_metrics = test_metrics,
-  ljung_p      = ljung_p,
+  lb           = lb,
   identifiable = TRUE,
   aic          = hw_model$model$aic,
   bic          = hw_model$model$bic,
-  notes        = "2021+ window avoids COVID; gamma ~ 0 (series pre-adjusted)"
+  spec         = "kind=hw;seasonal=additive",
+  notes        = sprintf("2021+ window avoids COVID; gamma=%.1e (frozen seasonals, spread %.0f)",
+                         hw_model$model$par["gamma"], diff(range(seasonal_values)))
 )
 
 # 7. Forecast Results
@@ -227,7 +261,7 @@ ggsave("holt_winters_test_forecast_plot.png", test_forecast_plot,
 seasonal_plot <- ggseasonplot(as_monthly_ts(parts$all), year.labels = TRUE) +
   labs(
     title    = "Seasonal Plot of Female Employment",
-    subtitle = "Each line is one year",
+    subtitle = "Each line is one year - on a series BLS has already deseasonalised",
     x = "Month", y = "Employment Level (Thousands)"
   ) +
   theme_minimal()
@@ -235,7 +269,58 @@ seasonal_plot <- ggseasonplot(as_monthly_ts(parts$all), year.labels = TRUE) +
 ggsave("holt_winters_seasonal_plot.png", seasonal_plot,
        width = 8, height = 5, dpi = 300)
 
-# 10. Final Model Using the Full Window, then a genuine 12-month forward forecast
+# ==============================================================================
+# 10. DO THE SEASONAL TERMS EARN THEIR PLACE?
+#
+# gamma is ~1e-4, so the seasonal component never updates - it is a fixed offset
+# pattern estimated from 43 training observations on a series that BLS has
+# already seasonally adjusted. The obvious alternative is the same model without
+# it: ETS(A,A,N), Holt's linear trend, which drops 11 parameters.
+#
+# This is a diagnostic, not a competing entry in the comparison table. But if
+# Holt is at least as accurate, then the seasonal component is fitting noise and
+# the report must not present the seasonal indices as a finding about the series.
+# ==============================================================================
+cat("\n\n=== DOES THE SEASONAL COMPONENT EARN ITS PLACE? ===\n")
+
+holt_model <- forecast::holt(train_val_ts, h = HORIZON, level = c(80, 95))
+holt_metrics <- evaluate(parts$test$value, holt_model$mean,
+                         exclude = parts$test$imputed)
+
+holt_val <- evaluate(parts$val$value,
+                     forecast::holt(train_ts, h = HORIZON)$mean)
+
+seasonal_check <- data.frame(
+  Model     = c("Holt-Winters additive (reported)", "ETS(A,A,N) - Holt, no seasonal"),
+  N_par     = c(length(hw_model$model$par), length(holt_model$model$par)),
+  Val_RMSE  = c(val_metrics["RMSE"],  holt_val["RMSE"]),
+  Test_RMSE = c(test_metrics["RMSE"], holt_metrics["RMSE"]),
+  Test_MAE  = c(test_metrics["MAE"],  holt_metrics["MAE"]),
+  Test_MASE = c(test_metrics["MASE"], holt_metrics["MASE"]),
+  AICc      = c(hw_model$model$aicc,  holt_model$model$aicc),
+  row.names = NULL
+)
+print(seasonal_check, row.names = FALSE, digits = 5)
+
+write.csv(seasonal_check, "holt_winters_seasonal_check.csv", row.names = FALSE)
+
+if (holt_metrics["RMSE"] <= test_metrics["RMSE"]) {
+  cat("\nFINDING: dropping the seasonal component is at least as accurate on the\n")
+  cat(sprintf("test block (%.1f vs %.1f RMSE) while estimating %d fewer parameters.\n",
+              holt_metrics["RMSE"], test_metrics["RMSE"],
+              length(hw_model$model$par) - length(holt_model$model$par)))
+  cat("The seasonal indices printed in section 4 are therefore fitting noise on a\n")
+  cat("pre-adjusted series. Report them as an artefact, NOT as evidence of\n")
+  cat("seasonality in female employment.\n")
+} else {
+  cat("\nFINDING: the seasonal component does improve test accuracy here\n")
+  cat(sprintf("(%.1f vs %.1f RMSE). Given gamma ~ 0 and a pre-adjusted series this is\n",
+              test_metrics["RMSE"], holt_metrics["RMSE"]))
+  cat("more likely a fixed level correction than genuine seasonality - check\n")
+  cat("whether the gap survives in rolling_cv.R before claiming otherwise.\n")
+}
+
+# 11. Final Model Using the Full Window, then a genuine 12-month forward forecast
 # The test months are included here because a real forward forecast has no reason
 # to discard the most recent observations.
 final_hw_model <- forecast::hw(as_monthly_ts(parts$all), seasonal = "additive",
@@ -245,7 +330,7 @@ cat("\nFull-window Holt-Winters Additive Model:\n")
 print(final_hw_model$model)
 
 future_dates <- seq(
-  from = seq(max(data$date), by = "month", length.out = 2)[2],
+  from = month_add(max(data$date), 1),
   by = "month", length.out = HORIZON
 )
 
@@ -260,11 +345,13 @@ future_forecast_results <- data.frame(
 
 cat("\nFuture 12-Month Forecast:\n")
 print(future_forecast_results, row.names = FALSE, digits = 6)
+cat("Any month-to-month step in this forecast is the FROZEN seasonal pattern,\n")
+cat("not a prediction about that month - see section 10.\n")
 
 write.csv(future_forecast_results, "holt_winters_future_forecast.csv",
           row.names = FALSE)
 
-# 11. Final Forecast Plot
+# 12. Final Forecast Plot
 history_data <- data.frame(date = parts$all$date, actual = parts$all$value)
 
 forecast_line_data <- rbind(

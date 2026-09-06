@@ -3,18 +3,23 @@
 #
 #   Rscript run_all.R
 #
-# Order matters: data_processing.R writes the CSV that common.R and every model
-# reads. The comparison table is built last, from the one-row result file each
-# model writes.
+# Order matters, and in two directions:
+#   - data_processing.R writes the CSV that common.R and every model reads.
+#   - compare_models.R AND rolling_cv.R both run last, because both read the
+#     one-row *_result.csv each model writes. rolling_cv.R in particular takes
+#     the SELECTED specification from those files rather than keeping its own
+#     copy, so running it against stale result files scores stale models.
 #
 # Each script is run in its own environment so nothing leaks between them - one
 # script's stray variable can no longer change another's result. session_info.txt
 # is written at the end so the package versions behind a set of results are on
 # the record.
 #
-# RUNTIME: about ten minutes end to end. SARIMA.R fits 225 candidate models
-# (cached in sarima_model_selection.csv) and rolling_cv.R refits every model at
-# 24 forecast origins.
+# RUNTIME: roughly ten to thirty minutes end to end, dominated by SARIMA.R's
+# 225-specification grid. That grid is cached in sarima_model_selection.csv with
+# a fingerprint of the data and the split; an unchanged project reuses it and the
+# whole run drops to a few minutes. rolling_cv.R refits every model at 24
+# forecast origins and is the other slow step.
 # ==============================================================================
 
 SCRIPTS <- c(
