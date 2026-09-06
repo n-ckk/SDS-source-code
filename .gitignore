@@ -5,6 +5,7 @@ sarima_*.csv
 auto_arima_*.csv
 holt_winters_*.csv
 ARX_GARCH_*.csv
+rolling_cv_*.csv
 *.png
 Rplots.pdf
 session_info.txt
