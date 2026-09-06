@@ -1,0 +1,20 @@
+# Generated analysis outputs - regenerate with: Rscript run_all.R
+*_result.csv
+model_comparison*.csv
+sarima_*.csv
+auto_arima_*.csv
+holt_winters_*.csv
+ARX_GARCH_*.csv
+rolling_cv_*.csv
+empirical_error_quantiles.csv
+*.png
+Rplots.pdf
+session_info.txt
+
+# Local run logs
+_*_run.log
+
+# R workspace
+.Rhistory
+.RData
+.Rproj.user/

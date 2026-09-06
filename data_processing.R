@@ -57,12 +57,48 @@ print(colSums(is.na(data)))
 data <- data %>%
   filter(!is.na(date))
 
+# Put the data on a COMPLETE monthly grid before doing anything else.
+#
+# Everything downstream builds a ts() by counting forward from the first date at
+# frequency 12, which has no way to notice an absent month: one missing ROW would
+# shift every later observation back by one and silently mis-date the entire
+# series, the split, and every forecast. This script only ever dropped rows with
+# a missing DATE, so a gap in the workbook would have passed straight through.
+# Re-indexing onto the full grid turns any missing row into a missing VALUE,
+# which the interpolation below handles and the `imputed` flag records.
+# common.R::load_series() re-checks the grid and refuses to load a broken one.
+full_grid <- data.frame(date = seq(min(data$date), max(data$date), by = "month"))
+n_before  <- nrow(data)
+data <- full_grid %>%
+  left_join(data, by = "date") %>%
+  arrange(date)
+
+if (nrow(data) > n_before) {
+  cat("\nRows added to complete the monthly grid:", nrow(data) - n_before, "\n")
+  cat("Missing months were:",
+      paste(format(data$date[is.na(data$female_employment)]), collapse = ", "),
+      "\n")
+}
+
+# Record which months are interpolated BEFORE filling them. This flag is written
+# to the CSV so every downstream model can report - or exclude - synthetic points
+# instead of re-deriving the flag and getting it wrong. 2025-10 is blank at source
+# and falls inside every model's test window; common.R::evaluate() excludes it
+# from every score, for models and benchmarks alike.
+data$imputed <- is.na(data$female_employment)
+
 # Fill missing female employment values using linear interpolation
 data$female_employment <- na.approx(
   data$female_employment,
   x = data$date,
   na.rm = FALSE
 )
+
+cat("\nMonths interpolated:", sum(data$imputed), "\n")
+if (any(data$imputed)) {
+  cat("Dates interpolated :",
+      paste(format(data$date[data$imputed]), collapse = ", "), "\n")
+}
 
 cat("\nMissing values after interpolation:\n")
 print(colSums(is.na(data)))
@@ -155,37 +191,10 @@ plot(
 )
 
 # 14. Train-Test Split
-# Last 12 months are used as test data
-test_size <- 12
-
-train_ts <- head(
-  female_ts,
-  length(female_ts) - test_size
-)
-
-test_ts <- tail(
-  female_ts,
-  test_size
-)
-
-cat("\nTraining observations:", length(train_ts), "\n")
-cat("Testing observations:", length(test_ts), "\n")
-
-cat(
-  "Training period:",
-  start(train_ts),
-  "to",
-  end(train_ts),
-  "\n"
-)
-
-cat(
-  "Testing period:",
-  start(test_ts),
-  "to",
-  end(test_ts),
-  "\n"
-)
+# REMOVED. The authoritative split lives in common.R (VAL_START / TEST_START) and
+# is shared by every model. This script previously printed a second, two-way split
+# that no model actually used and that disagreed with the three-way split the
+# models apply - exactly the kind of drift common.R exists to prevent.
 
 # 15. Save Processed Data
 write.csv(
